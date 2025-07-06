@@ -256,3 +256,71 @@ sudo nano /etc/systemd/system/object-detect.service
 ```
 
 Lalu saya beri isinya. Mau saya lanjutkan ke bagian ini?
+
+
+
+
+
+
+
+
+Pertanyaan bagus! 🎯
+
+### ✨ Penjelasan `setup_object_detection.sh`
+
+`setup_object_detection.sh` adalah **script setup otomatis** yang saya buat khusus agar kamu **tidak perlu mengetik semuanya manual satu per satu**.
+
+---
+
+## 🔧 Fungsi Script Ini:
+
+Begitu dijalankan, script ini akan:
+
+✅ Membuat struktur folder proyek
+✅ Mengunduh model TFLite dan file label
+✅ Membuat file HTML (`index.html`)
+✅ Membuat file Python deteksi (`stream_detect.py`)
+✅ Setelah selesai, kamu tinggal menjalankannya
+
+---
+
+## 🧭 Jadi, Bagaimana Cara Pakainya?
+
+Script ini **memang perlu dibuat sekali secara manual** (copy-paste ke file), lalu kamu jalankan. Setelah itu semua otomatis.
+
+### ✅ Langkah Ringkas:
+
+1. **Buat file script-nya:**
+
+```bash
+nano setup_object_detection.sh
+```
+
+2. **Copy-paste** isi script dari saya sebelumnya ke situ, lalu **simpan dan keluar**.
+
+3. **Jalankan sekali:**
+
+```bash
+chmod +x setup_object_detection.sh
+./setup_object_detection.sh
+```
+
+🎉 Maka Raspberry Pi kamu akan langsung siap untuk deteksi objek via web!
+
+---
+
+## 🔁 Setelah itu?
+
+Setelah script dijalankan satu kali, kamu **tidak perlu jalankan script ini lagi**, cukup:
+
+```bash
+cd ~/object_web
+python3 stream_detect.py
+```
+
+---
+
+## 🔄 Mau saya kirim versi file `.sh` langsung?
+
+Kalau kamu mau, saya bisa kasih file `.sh` dalam bentuk upload langsung biar kamu tinggal unduh dan jalankan tanpa copy-paste. Mau seperti itu?
+
