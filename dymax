@@ -1,0 +1,341 @@
+Berikut adalah **panduan lengkap dan sesederhana mungkin** untuk membuat **Object Detection dengan Raspberry Pi 4 dan USB camera**, yang:
+
+* Tidak berisiko (stabil dan aman untuk dijalankan di Pi 4).
+* Tidak perlu menginstal `pip3 tflite-runtime`, `numpy`, atau `flask`.
+* Menampilkan hasil deteksi **secara real-time melalui website** (streaming video IP).
+
+Saya akan gunakan **paket yang sudah tersedia secara bawaan atau mudah diinstal** lewat `apt`, tanpa pip/pip3 jika memungkinkan. Kita akan pakai:
+
+* OpenCV (dari `apt`, bukan pip)
+* Python bawaan
+* `cvlib` diganti dengan script custom (agar tidak perlu install library berat)
+* `simple HTTP server` built-in Python untuk streaming
+
+---
+
+## 🎯 Tujuan Akhir:
+
+Melihat deteksi objek secara real-time dari USB camera Raspberry Pi lewat browser melalui IP address (misalnya `http://192.168.1.42:8000`).
+
+---
+
+## 🧰 1. **Perlengkapan & Persiapan**
+
+### Hardware:
+
+* Raspberry Pi 4 (RAM 2GB+ disarankan)
+* USB Camera
+* MicroSD (Raspberry Pi OS sudah terinstal, gunakan **Lite** atau **Desktop**)
+* Jaringan WiFi atau LAN (agar bisa diakses lewat IP)
+
+### Software:
+
+* Raspberry Pi OS (32-bit, terbaru)
+* Tidak memerlukan pip/pip3
+
+---
+
+## 🪛 2. **Installasi Software (tanpa pip)**
+
+### Update sistem dulu:
+
+```bash
+sudo apt update && sudo apt upgrade -y
+```
+
+### Install Python OpenCV dari apt:
+
+```bash
+sudo apt install python3-opencv -y
+```
+
+📦 Ini akan menginstall:
+
+* `cv2` untuk pengolahan gambar/video
+* `numpy` (sudah termasuk dari `apt`)
+* Tanpa pip!
+
+---
+
+## 📷 3. **Cek Kamera USB**
+
+Pastikan kamera dikenali:
+
+```bash
+ls /dev/video*
+```
+
+Harus muncul `/dev/video0`
+
+---
+
+## 🤖 4. **Download Model TFLite + Label COCO**
+
+### Buat folder kerja:
+
+```bash
+mkdir ~/object-detection && cd ~/object-detection
+```
+
+### Unduh model TFLite:
+
+```bash
+wget https://storage.googleapis.com/download.tensorflow.org/models/tflite/coco_ssd_mobilenet_v1_1.0_quant_2018_06_29.zip
+unzip coco_ssd_mobilenet_v1_1.0_quant_2018_06_29.zip
+```
+
+### Unduh label COCO:
+
+```bash
+wget https://storage.googleapis.com/download.tensorflow.org/data/mscoco_label_map.txt -O labelmap.txt
+```
+
+---
+
+## 🧠 5. **Script Deteksi Objek + Web Streaming**
+
+Gunakan script Python sederhana tanpa Flask.
+
+### 📄 Buat file: `detect_stream.py`
+
+```python
+import cv2
+import numpy as np
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import socketserver
+import threading
+import time
+
+from tflite_runtime.interpreter import Interpreter
+
+# Load label map
+with open("labelmap.txt", "r") as f:
+    labels = [line.strip() for line in f.readlines()]
+
+# Load model
+interpreter = Interpreter(model_path="detect.tflite")
+interpreter.allocate_tensors()
+
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+height = input_details[0]['shape'][1]
+width = input_details[0]['shape'][2]
+
+# Video capture
+cap = cv2.VideoCapture(0)
+
+frame_lock = threading.Lock()
+global_frame = None
+
+def detect_objects():
+    global global_frame
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        input_frame = cv2.resize(frame, (width, height))
+        input_data = np.expand_dims(input_frame, axis=0)
+
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+
+        boxes = interpreter.get_tensor(output_details[0]['index'])[0]
+        classes = interpreter.get_tensor(output_details[1]['index'])[0]
+        scores = interpreter.get_tensor(output_details[2]['index'])[0]
+
+        for i in range(len(scores)):
+            if scores[i] > 0.5:
+                ymin, xmin, ymax, xmax = boxes[i]
+                (left, top, right, bottom) = (int(xmin * frame.shape[1]),
+                                              int(ymin * frame.shape[0]),
+                                              int(xmax * frame.shape[1]),
+                                              int(ymax * frame.shape[0]))
+                class_id = int(classes[i])
+                label = labels[class_id] if class_id < len(labels) else 'N/A'
+                cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                cv2.putText(frame, label, (left, top - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        ret, jpeg = cv2.imencode('.jpg', frame)
+        with frame_lock:
+            global_frame = jpeg.tobytes()
+
+class StreamingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type',
+                             'multipart/x-mixed-replace; boundary=frame')
+            self.end_headers()
+            while True:
+                with frame_lock:
+                    if global_frame is None:
+                        continue
+                    frame = global_frame
+                try:
+                    self.wfile.write(b'--frame\r\n')
+                    self.send_header('Content-Type', 'image/jpeg')
+                    self.send_header('Content-Length', len(frame))
+                    self.end_headers()
+                    self.wfile.write(frame)
+                    self.wfile.write(b'\r\n')
+                    time.sleep(0.05)
+                except Exception as e:
+                    break
+
+def start_server():
+    server = HTTPServer(('', 8000), StreamingHandler)
+    print("Streaming on http://<raspberry_ip>:8000")
+    server.serve_forever()
+
+# Mulai deteksi & streaming
+threading.Thread(target=detect_objects, daemon=True).start()
+start_server()
+```
+
+---
+
+## 🚀 6. **Jalankan Deteksi + Akses Web**
+
+### Jalankan:
+
+```bash
+python3 detect_stream.py
+```
+
+### Buka browser:
+
+Ketik IP Raspberry Pi di browser:
+
+```text
+http://<IP-raspberry>:8000
+```
+
+Contoh: `http://192.168.1.42:8000`
+
+---
+
+## ✅ Hasil
+
+* Deteksi objek dilakukan dengan TFLite
+* Tampilan real-time bisa diakses lewat browser
+* Tidak perlu Flask, pip, numpy manual
+* Semua dependensi bisa lewat `apt install`
+
+---
+
+## ⚠️ Tips Tambahan
+
+* Jika kamera lambat, turunkan resolusi dengan `cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)`
+* Bisa dibuat service agar otomatis jalan saat booting
+* Pastikan IP Raspberry Pi tetap menggunakan DHCP reservation atau static IP
+
+---
+
+Kalau kamu mau, saya bisa bantu **konversi script ini jadi sistem service** agar auto-start saat boot, atau ditambahkan UI sederhana untuk kontrol model.
+
+Mau dilanjut ke tahap itu?
+
+
+=============================================================================================================================================================================
+Untuk mengecek apakah Raspberry Pi kamu menggunakan **IP DHCP (dinamis)** atau **static (tetap)**, kamu bisa lakukan langkah berikut:
+
+---
+
+## ✅ **1. Cek IP Address Saat Ini**
+
+Di terminal Raspberry Pi, jalankan:
+
+```bash
+hostname -I
+```
+
+Contohnya output:
+
+```
+192.168.1.42
+```
+
+Itu adalah IP address saat ini, tapi belum menunjukkan apakah DHCP atau static.
+
+---
+
+## 🔍 **2. Cek Konfigurasi Network (dhcpcd.conf)**
+
+File utama yang menentukan apakah Raspberry Pi memakai DHCP atau Static adalah:
+
+```bash
+/etc/dhcpcd.conf
+```
+
+### Buka file untuk dicek:
+
+```bash
+sudo nano /etc/dhcpcd.conf
+```
+
+Lalu scroll ke bagian bawah, cari baris seperti ini:
+
+```bash
+interface wlan0
+static ip_address=192.168.1.100/24
+static routers=192.168.1.1
+static domain_name_servers=8.8.8.8
+```
+
+Jika **bagian ini aktif dan tidak dikomentari (#)**, berarti kamu memakai **static IP**.
+
+Jika **tidak ada konfigurasi `interface wlan0` atau `eth0`**, maka Raspberry Pi **menggunakan DHCP secara default**.
+
+> 🔹 `wlan0` = Wi-Fi
+> 🔹 `eth0` = LAN kabel
+
+---
+
+## ✅ Contoh DHCP (default Raspberry Pi)
+
+File `/etc/dhcpcd.conf` tidak ada pengaturan manual:
+
+```bash
+# Example static IP configuration:
+#interface wlan0
+#static ip_address=192.168.1.100/24
+#static routers=192.168.1.1
+#static domain_name_servers=8.8.8.8
+```
+
+➡️ Maka IP ditentukan otomatis oleh router (DHCP).
+
+---
+
+## ✅ Contoh Static IP
+
+Jika terlihat seperti ini (tidak dikomentari):
+
+```bash
+interface wlan0
+static ip_address=192.168.1.100/24
+static routers=192.168.1.1
+static domain_name_servers=1.1.1.1 8.8.8.8
+```
+
+➡️ Maka IP akan **tetap** (static), tidak berubah walau reboot.
+
+---
+
+## 📌 Tips: Menetapkan IP Tetap Tanpa Ubah dhcpcd
+
+Kalau kamu tidak ingin edit file di Raspberry Pi, alternatifnya:
+
+1. Masuk ke pengaturan router.
+2. Cari fitur **DHCP reservation**.
+3. Kaitkan MAC Address Raspberry Pi dengan IP tetap (contoh: 192.168.1.100).
+
+Ini lebih stabil & tidak perlu modifikasi OS Raspberry Pi.
+
+---
+
+Kalau kamu mau saya bantu **set static IP di Raspberry Pi**, tinggal bilang saja pakai Wi-Fi atau LAN dan berapa IP yang kamu mau tetapkan.
