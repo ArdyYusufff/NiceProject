@@ -1,0 +1,258 @@
+Tentu! Berikut adalah **step-by-step lengkap dan jelas** untuk membuat sistem **real-time object detection menggunakan Raspberry Pi 4 dan USB camera**, dengan hasil ditampilkan di **web browser**, tanpa `pip`, tanpa `flask`, dan **100% bisa dijalankan hanya dengan Python bawaan dan OpenCV**.
+
+---
+
+# 🎯 Tujuan Proyek
+
+Membangun sistem deteksi objek real-time menggunakan **Raspberry Pi 4** dan **USB camera**, dengan hasil video deteksi dapat diakses melalui browser lewat jaringan lokal (LAN/Wi-Fi).
+
+---
+
+# 🧩 Rangkuman Komponen
+
+### 🧠 Software:
+
+* Python 3 (sudah ada di Raspberry Pi OS)
+* `OpenCV` (diinstal lewat `apt`)
+* `tflite_runtime` (versi ringan TensorFlow Lite)
+* HTTP server bawaan (`http.server` dari Python)
+
+### 🧱 Hardware:
+
+* Raspberry Pi 4
+* USB Camera (Plug & Play)
+* Koneksi LAN/Wi-Fi ke jaringan lokal
+
+---
+
+# 🧪 Tahapan Lengkap
+
+---
+
+## 🔹 1. Update Raspberry Pi
+
+```bash
+sudo apt update && sudo apt upgrade -y
+```
+
+---
+
+## 🔹 2. Install OpenCV dan tflite\_runtime
+
+```bash
+sudo apt install python3-opencv -y
+pip3 install --no-deps tflite-runtime==2.5.0
+```
+
+*(Atau gunakan versi `tflite-runtime` yang sesuai jika kamu punya Raspberry Pi OS 64-bit atau Python 3.11, dll.)*
+
+---
+
+## 🔹 3. Buat File Setup Otomatis
+
+```bash
+nano setup_object_detection.sh
+```
+
+Lalu **copy-paste script di bawah ini:**
+
+<details>
+<summary>Klik untuk menampilkan isi lengkap <code>setup_object_detection.sh</code></summary>
+
+```bash
+#!/bin/bash
+
+echo "📁 Membuat struktur folder..."
+mkdir -p ~/object_web/templates
+mkdir -p ~/object_web/tflite-models
+
+echo "⬇️ Mengunduh model TensorFlow Lite..."
+cd ~/object_web/tflite-models
+wget -q https://storage.googleapis.com/download.tensorflow.org/models/tflite/coco_ssd_mobilenet_v1_1.0_quant_2018_06_29.zip
+unzip -q coco_ssd_mobilenet_v1_1.0_quant_2018_06_29.zip
+mv coco_ssd_mobilenet_v1_1.0_quant.tflite detect.tflite
+rm coco_ssd_mobilenet_v1_1.0_quant_2018_06_29.zip
+
+echo "🗂️ Mengunduh label COCO..."
+wget -q https://raw.githubusercontent.com/tensorflow/models/master/research/object_detection/data/mscoco_label_map.pbtxt -O labelmap.txt
+
+echo "📝 Membuat HTML template..."
+cat <<EOF > ~/object_web/templates/index.html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Live Object Detection</title>
+</head>
+<body>
+  <h2>Raspberry Pi Object Detection Stream</h2>
+  <img src="/video_feed" width="640" height="480">
+</body>
+</html>
+EOF
+
+echo "📝 Membuat Python script deteksi dan streaming..."
+cat <<'EOF' > ~/object_web/stream_detect.py
+import cv2
+import numpy as np
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+from time import sleep
+from tflite_runtime.interpreter import Interpreter
+
+cap = cv2.VideoCapture(0)
+
+interpreter = Interpreter(model_path='tflite-models/detect.tflite')
+interpreter.allocate_tensors()
+
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+input_height = input_details[0]['shape'][1]
+input_width = input_details[0]['shape'][2]
+
+with open('tflite-models/labelmap.txt', 'r') as f:
+    labels = [line.strip() for line in f.readlines()]
+
+frame_lock = threading.Lock()
+output_frame = None
+
+def detect_objects():
+    global output_frame
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        image = cv2.resize(frame, (input_width, input_height))
+        input_data = np.expand_dims(image, axis=0)
+
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+
+        boxes = interpreter.get_tensor(output_details[0]['index'])[0]
+        classes = interpreter.get_tensor(output_details[1]['index'])[0]
+        scores = interpreter.get_tensor(output_details[2]['index'])[0]
+
+        height, width, _ = frame.shape
+        for i in range(len(scores)):
+            if scores[i] > 0.5:
+                ymin, xmin, ymax, xmax = boxes[i]
+                (left, top, right, bottom) = (
+                    int(xmin * width), int(ymin * height),
+                    int(xmax * width), int(ymax * height))
+                cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                label = f"{labels[int(classes[i])]}: {int(scores[i]*100)}%"
+                cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        with frame_lock:
+            output_frame = frame.copy()
+        sleep(0.05)
+
+class MJPEGHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type','text/html')
+            self.end_headers()
+            with open('templates/index.html', 'rb') as file:
+                self.wfile.write(file.read())
+        elif self.path == '/video_feed':
+            self.send_response(200)
+            self.send_header('Age', 0)
+            self.send_header('Cache-Control', 'no-cache, private')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+            self.end_headers()
+
+            while True:
+                with frame_lock:
+                    if output_frame is None:
+                        continue
+                    ret, jpeg = cv2.imencode('.jpg', output_frame)
+                    if not ret:
+                        continue
+                self.wfile.write(b'--frame\r\n')
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_header('Content-Length', str(len(jpeg)))
+                self.end_headers()
+                self.wfile.write(jpeg.tobytes())
+                self.wfile.write(b'\r\n')
+                sleep(0.05)
+        else:
+            self.send_error(404)
+
+def run():
+    print("Starting MJPEG Server at http://<your-ip>:8000")
+    server = HTTPServer(('', 8000), MJPEGHandler)
+    server.serve_forever()
+
+if __name__ == '__main__':
+    threading.Thread(target=detect_objects, daemon=True).start()
+    run()
+EOF
+
+echo "✅ Setup selesai!"
+echo "➡️ Jalankan dengan: cd ~/object_web && python3 stream_detect.py"
+```
+
+</details>
+
+---
+
+## 🔹 4. Simpan dan Jalankan Script
+
+```bash
+chmod +x setup_object_detection.sh
+./setup_object_detection.sh
+```
+
+---
+
+## 🔹 5. Jalankan Deteksi
+
+```bash
+cd ~/object_web
+python3 stream_detect.py
+```
+
+---
+
+## 🔹 6. Akses Video Real-Time
+
+Buka browser dari perangkat lain (PC/HP di jaringan sama), dan akses:
+
+```
+http://<IP-RASPBERRYPI>:8000
+```
+
+Contoh:
+
+```
+http://192.168.1.42:8000
+```
+
+---
+
+# ✅ Struktur File Akhir
+
+```
+/home/pi/object_web/
+├── stream_detect.py               ← Script utama deteksi + MJPEG
+├── setup_object_detection.sh      ← Script setup otomatis
+├── templates/
+│   └── index.html                 ← Halaman web stream
+└── tflite-models/
+    ├── detect.tflite              ← Model deteksi TFLite
+    └── labelmap.txt               ← Label COCO classes
+```
+
+---
+
+# 🔄 OPSIONAL: Otomatis Jalan Saat Boot
+
+Kalau kamu ingin script ini jalan otomatis saat Raspberry Pi menyala, saya bisa bantu buatkan file systemd service seperti:
+
+```bash
+sudo nano /etc/systemd/system/object-detect.service
+```
+
+Lalu saya beri isinya. Mau saya lanjutkan ke bagian ini?
